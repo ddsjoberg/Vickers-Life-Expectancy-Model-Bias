@@ -1,0 +1,294 @@
+---
+title: "Vickers Life Expectancy Model Bias"
+date: "`r format(Sys.Date(), format='%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+  word_document:
+    reference_docx: !expr here::here('scripts/templates/doc_template.docx')
+bibliography: "`r here::here('scripts/templates/references.bib')`"
+csl: "`r here::here('scripts/templates/european-urology.csl')`"
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+# set chunk defaults, code chunks are NOT printed in output for report
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+set.seed(20220514)
+devtools::load_all(path = here::here())
+```
+
+```{r import, include = FALSE}
+library(patchwork)
+library(hotverse); library(tidyverse)
+# setting MSK ggplot theme, gtsummary theme, and color palette
+theme_set(mskRvis::theme_biostat()); theme_gtsummary_msk("hot"); mskRvis::set_msk_palette()
+
+# Import analysis result objects here
+load(file = here("results", "df_simulated.Rdata"))
+load(file = here("results", "df_results.Rdata"))
+```
+
+```{r inline_text, include = FALSE}
+# define complex inline-reporting objects here
+sim_other_cause_risks <-
+  df_simulated$true_risk_other_cause_death |> unique() |> sort() %>% as.character() %>%
+  as.numeric() %>% style_percent(symbol = TRUE) %>% 
+  glue::glue_collapse(sep = ", ", last = ", and ")
+sim_cancer_risks <-
+  df_simulated$true_risk_cancer_death |> unique() |> sort() %>% as.character() %>%
+  as.numeric() %>% style_percent(symbol = TRUE) %>% 
+  glue::glue_collapse(sep = ", ", last = ", and ")
+sim_n <- 
+  df_simulated %>%
+  filter(true_risk_other_cause_death == true_risk_other_cause_death[1],
+         true_risk_cancer_death == true_risk_cancer_death[1]) %>%
+  nrow() %>%
+  style_number()
+```
+
+# Introduction
+
+Accurate estimation of a cancer patient's risk of death from cancer is crucial for treatment planning and patient counseling.
+Large data sets suitable for creating risk prediction models for cancer patients will not include detailed information on patient comorbidities.
+Conversely, large data sets with detailed information on comorbidities suitable prediction of other-cause mortality will not include detailed information on cancer burden. For example, take two patients with identical low risk disease profile.
+If the first patient is highly comorbid with low life expectancy and the second is healthy with a long life expectancy, a clinician may choose to aggressively treat the healthy patient and provide palliative care for the comorbid patient.
+To make this decision, a clinician must weigh the cancer risk against the patient's risk of death from other causes.
+We, therefore, are in need of methods to combine risk predictions of death from cancer and death from other causes.
+
+# Methods
+
+Most risk prediction models provide a single estimate of risk of death from other causes or death from cancer.
+For example, two calculators may give a patient a risk of death from cancer within 10 years of 15% and risk of death from other causes at 5% within the same 10 year period. Other calculators may provide additional information, for example, risks at multiple time points, or even an estimate of the entire survival curve, $S(t)$.
+
+With the estimates of risk from the calculators, we can assume a survival curve (if not already provided).
+For example, if a single risk estimate, $p$, is provided at time $t$, it is reasonable to assume an exponential distribution of time to death. In this case, we can define the time to death distribution with
+
+$$
+\lambda = \frac{-\log(1 - p)}{t}
+$$
+
+where
+
+$$
+X \sim Exp(\lambda) = \lambda e^{-\lambda x},\ X = \{time\ to\ death\}
+$$
+
+Let $X$ and $Y$ be independent random variables with support on $(0, \infty)$, and represent a patient's risk of death from cancer and death from other causes.
+We wish to solve for the probability that $P(Y < X, Y < t)$ for some $t > 0$.
+That is, we wish to solve for the probability that a patient passes away from cancer before other causes and within $t$ years.
+Let $f_X(x)$, $f_Y(y)$ and $F_X(x)$, $F_Y(y)$ be the probability and the cumulative density functions for $X$ and $Y$, respectively.
+
+```{r, fig.height=3, fig.align = 'center'}
+label_t <- function(x) dplyr::case_when(x == 1 ~ "t", x == 0 ~ "0", TRUE ~ "")
+tibble(X = seq(0, 1, length.out = 2), Y = X) %>%
+  ggplot(aes(x = X, y = Y)) +
+  geom_area(fill = "blue", alpha = 0.1) +
+  geom_area(
+    data = tibble(X = seq(1, 1.2, length.out = 2), Y = 1),
+    aes(x = X, y = Y),
+    fill = "blue", alpha = 0.1
+  ) +
+  geom_function(fun = identity, colour = "grey", linetype = "dashed", 
+                xlim = c(0, 1.2), size = 0.9) +
+  geom_hline(yintercept = 1, linetype = "dotted", size = 0.9) +
+  geom_vline(xintercept = 1, linetype = "dotted", size = 0.9) +
+  scale_y_continuous(labels = label_t, breaks = c(0, 1), expand = c(0, 0)) +
+  scale_x_continuous(labels = label_t, breaks = c(0, 1), expand = c(0, 0)) +
+  theme_classic() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.text = element_text(size = 12))
+```
+
+
+$$
+\begin{aligned}
+P(Y < X, Y < t) &= P(Y < X | Y < t) P(Y < t) \\
+&= \int_{y = 0}^{t}\int_{x = y}^{\infty} f_{X,Y|Y < t}(x, y)dxdy F_Y(t) \\
+&= F_Y(t) \int_{y = 0}^{t}\int_{x = y}^{\infty} f_{X}(x) f_{Y | Y < t}(y) dxdy \\
+&= F_Y(t) \int_{y = 0}^{t}\int_{x = y}^{\infty} f_{X}(x) \frac{f_Y(y)}{F_Y(t)} dxdy \\
+&= \int_{y = 0}^{t}\int_{x = y}^{\infty} f_{X}(x) f_Y(y) dxdy \\
+&= \int_{y = 0}^{t} f_Y(y) [1 - F_X(y)] dy \\
+&= \int_{y = 0}^{t} f_Y(y) dy - \int_{y = 0}^{t} f_Y(y) F_X(y) dy \\
+&= F_Y(t) - \int_{y = 0}^{t} f_Y(y) F_X(y) dy 
+\end{aligned}
+$$
+
+The formulas above hold for any distributions.
+However, let's now make the assumption that $X \sim Exp(\lambda_x)$ and $Y \sim Exp(\lambda_y)$.
+
+$$
+\begin{aligned}
+P(Y < X, Y < t) &= F_Y(t) - \int_{y = 0}^{t} f_Y(y) F_X(y) dy \\
+&= F_Y(t) - \int_{y = 0}^{t} f_Y(y) (1 - e^{-\lambda_x y}) dy \\
+&= F_Y(t) - \int_{y = 0}^{t} f_Y(y) dy + \int_{y = 0}^{t} f_Y(y) e^{-\lambda_x y} dy \\
+&= F_Y(t) - F_Y(t) + \int_{y = 0}^{t} f_Y(y) e^{-\lambda_x y} dy \\
+&= \int_{y = 0}^{t} \lambda_y e^{-\lambda_y y} e^{-\lambda_x y} dy \\
+&= \frac{\lambda_y}{\lambda_y + \lambda_x} \int_{y = 0}^{t} (\lambda_y + \lambda_x) e^{-(\lambda_y + \lambda_x)y} dy \\
+&= \frac{\lambda_y}{\lambda_y + \lambda_x} \Big[1 - e^{-(\lambda_y + \lambda_x) t}\Big]
+\end{aligned}
+$$
+
+All analyses were conducted using `r cite_r(pkgs = c("tidyverse"), add_citation = TRUE)`.
+
+# Results
+
+As a sanity check, if $\lambda_y = \lambda_x$ and $t \to \infty$, we would expect the probability to evaluate to $0.5$.
+
+$$
+P(Y < X, Y < t) = \frac{\lambda_y}{\lambda_y + \lambda_x} \Big[1 - e^{-(\lambda_y + \lambda_x) t}\Big]
+= \frac{1}{2}(1)
+= \frac{1}{2}
+$$
+
+Let's work an example.
+Assume that a patient presents with a risk of death from cancer of 20% within 10 years and an identical risk of death from other causes.
+Let's now calculate the $\lambda$ values of the exponential distributions (both $\lambda$ values will be identical).
+
+$$
+\lambda = \frac{- \log(1 - 0.20)}{10} = 0.022
+$$
+
+Now updating the probability
+
+$$
+\begin{align}
+P(Y < X, Y < t) &= \frac{\lambda}{\lambda + \lambda} \Big[1 - e^{-(\lambda + \lambda) t}\Big] \\
+&= \frac{0.022}{0.022 + 0.022} \Big[1 - e^{-(0.022 + 0.022) * 10}\Big] \\
+&= 0.5 * 0.36 \\
+&= 0.18
+\end{align}
+$$
+
+This patient's risk of prostate cancer death within 10 years is 20%.
+This results would suggest that if we incorporate information about the patient's chance of dying from other causes before the patient dies from cancer, our model is estimates the risk of dying from cancer *decreases* to 18%.
+
+A few more examples of how risk of cancer death is modified by risk of death from other causes.
+Time frame being shown here is 10 year risk.
+
+```{r}
+gt_updated_risk <- 
+  list(
+    risk_other_cause_death = c(0.02, 0.10, 0.25, 0.5, 0.9),
+    risk_cancer_death = c(0.10, 0.25, 0.5, 0.9)
+  ) %>%
+  cross_df() %>%
+  arrange(risk_other_cause_death, risk_cancer_death) %>%
+  rowwise() %>%
+  mutate(
+    updated_risk_cancer_death = 
+      update_cancer_death_risk(risk_cancer_death, risk_other_cause_death, 10),
+    across(-updated_risk_cancer_death, ~style_percent(., symbol = TRUE)),
+    across(updated_risk_cancer_death, ~style_percent(., digits = 1, symbol = TRUE)),
+    risk_other_cause_death = paste(risk_other_cause_death, "Other Cause Mortality Risk")
+  ) %>%
+  group_by(risk_other_cause_death) %>%
+  gt::gt() %>%
+  gt::tab_options(row_group.font.weight = "bold") %>%
+  bstfun::style_tbl_compact() %>%
+  gt::cols_label(
+    risk_cancer_death = gt::md("**Raw Risk of Cancer Death**"),
+    updated_risk_cancer_death = gt::md("**Updated Risk of Cancer Death**")
+  )
+gt_updated_risk
+
+gg_updated_risk <-
+  list(
+    risk_other_cause_death = c(0.05, 0.10, 0.25, 0.5, 0.75, 0.9, 0.95),
+    risk_cancer_death = seq(0.0001, 0.9999, length.out = 100)
+  ) %>%
+  cross_df() %>%
+  arrange(risk_other_cause_death, risk_cancer_death) %>%
+  rowwise() %>%
+  mutate(
+    updated_risk_cancer_death = 
+      update_cancer_death_risk(risk_cancer_death, risk_other_cause_death, 10),
+    risk_other_cause_death =
+      style_percent(risk_other_cause_death, symbol = TRUE) %>%
+      factor(., levels = unique(.))
+  ) %>%
+  ggplot(aes(x = risk_cancer_death, 
+             y = updated_risk_cancer_death, 
+             color = risk_other_cause_death)) +
+  geom_line() +
+  geom_function(fun = identity, colour = "grey", linetype = "dashed") +
+  ggforce::facet_zoom(
+    # x = risk_cancer_death < 0.25,
+    xlim = c(0, 0.2),
+    ylim = c(0, 0.2),
+    horizontal = FALSE, 
+    show.area = FALSE
+  ) +
+  scale_x_continuous(labels = scales::percent) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    x = "Raw Risk of Death of Cancer",
+    y = "Updated Risk of Cancer Death",
+    color = "Risk of Other-cause Mortality"
+  ) +
+  theme_bw()
+gg_updated_risk
+```
+
+# Simulations
+
+Simulations were used to assess how the updates to the risks affect a model's diagnostic statistics.
+
+- Various levels of risk of other-cause mortality and cancer mortality were investigated (`r sim_other_cause_risks` and `r sim_cancer_risks`, respectively).
+- For every combination of other-cause and cancer death risk, `r sim_n` observations were simulated. The risk was assumed to be a 10-year risk and the risks were converted into a $\lambda$ parameter from an exponential distribution, and times to other-cause and cancer death were simulated independently.
+- Risk of death from cancer was estimated using Kaplan-Meier methods.
+- This risk was then modified by formulae above to account for a patient's risk of death from other causes.
+- From the simulated data, an indicator of death from cancer vs not dead from cancer was constructed, i.e. patients alive or dead from other causes are zero, and patients dead from cancer are one.
+- Results are presented separately by patients' risk of other-cause mortality
+
+### Model Calibration
+
+```{r, fig.height=13}
+df_results$gg_calibration %>%
+  reduce(`+`) +
+  plot_layout(ncol = 2)
+```
+
+<!-- ### Decision Curve Analysis -->
+
+<!-- ```{r, fig.height=13} -->
+<!-- df_results$gg_dca %>% -->
+<!--   reduce(`+`) + -->
+<!--   plot_layout(ncol = 2) -->
+<!-- ``` -->
+
+### Brier Score
+
+```{r}
+df_results %>%
+  select(true_risk_other_cause_death, brier) %>%
+  rowwise() %>%
+  mutate(
+    brier = enframe(unlist(brier)) %>% list(),
+    true_risk_other_cause_death = 
+      as.character(true_risk_other_cause_death) %>%
+      as.numeric()
+  ) %>%
+  unnest(cols = brier) %>%
+  pivot_wider(id_cols = true_risk_other_cause_death, 
+              values_from = value, 
+              names_from = name) %>%
+  gt::gt(caption = "Brier Score") %>%
+  gt::cols_label(
+    pr_cancer_survfit = gt::md("Raw Risk"),
+    updated_pr_cancer_survfit = gt::md("Updated Risk"), 
+    true_risk_other_cause_death = gt::md("Risk of Other-cause Mortality")
+  ) %>%
+  gt::fmt(true_risk_other_cause_death, fns = function(x) style_percent(x, symbol = TRUE)) %>%
+  gt::fmt(-true_risk_other_cause_death, fns = function(x) style_sigfig(x, digits = 3)) %>%
+  gt::cols_align(columns = everything(), "left") %>%
+  bstfun::style_tbl_compact() 
+```
+
+# References

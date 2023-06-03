@@ -1,0 +1,137 @@
+---
+title: "Vickers Life Expectancy Model Bias"
+subtitle: "Analysis"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(20220518)
+```
+
+RUN THIS REPORT AFTER THE SIMULATIONS HAVE BEEN RUN ON THE CLUSTER!
+
+# Analytic Data Import
+
+```{r import}
+library(hotverse); library(tidyverse)
+
+# setting MSK ggplot theme, gtsummary theme, and color palette
+theme_set(mskRvis::theme_biostat()); theme_gtsummary_msk("hot"); mskRvis::set_msk_palette()
+
+# importing master analytic data set
+load(file = here("results", "df_simulated.Rdata"))
+df_simulated <-
+  df_simulated |> 
+  select(time, true_risk_other_cause_death, outcome_observed_at_time, 
+         starts_with("pr_"), starts_with("updated_"))
+```
+
+
+# Model Diagnostics
+
+We have two types of predictions for cancer death:
+
+1. Using typical methods like Kaplan-Meier or Cox Regression
+2. Using competing event analysis.
+
+Each of these models have been "updated" using the risk of death from other causes.
+
+
+```{r analysis1}
+prediction_columns <- 
+  vctrs::vec_c(
+    "Raw Risk" = "pr_cancer_survfit", "Updated Risk" = "updated_pr_cancer_survfit",
+    # "pr_cancer_cuminc", "updated_pr_cancer_cuminc"
+  )
+
+df_results <-
+  df_simulated %>%
+  mutate(
+    cancer_observed_at_time = outcome_observed_at_time == "Dead from Cancer",
+    .after = outcome_observed_at_time
+  ) %>%
+  nest(data = -true_risk_other_cause_death) %>%
+  rowwise() %>%
+  mutate(
+    dca =
+      dcurves::dca(
+        cancer_observed_at_time ~ .,
+        data = data %>% select(cancer_observed_at_time, all_of(prediction_columns))
+      ) %>%
+      list(),
+    gg_dca =
+      (
+        plot(dca, smooth = TRUE) +
+         labs(
+           title =
+             paste("Risk of Other Cause Mortality",
+                   "{true_risk_other_cause_death %>% as.character() %>% as.numeric() %>% style_percent(symbol = TRUE)}") %>%
+             str_glue()
+         ) +
+          theme(plot.title = element_text(size = 12))
+        ) %>%
+      list(),
+    gg_calibration =
+      (
+        data %>%
+          select(cancer_observed_at_time, all_of(prediction_columns)) %>%
+          pivot_longer(cols = all_of(names(prediction_columns))) %>%
+          ggplot() +
+          geom_function(fun = identity, linetype = "dashed", colour = "grey") +
+          geom_smooth(aes(x = value,
+                          y = as.numeric(cancer_observed_at_time),
+                          color = name),
+                      method = loess, se = FALSE) +
+          ylim(0, 1) +
+          xlim(0, 1) +
+          labs(
+            title =
+              paste("Risk of Other-cause Mortality",
+                    "{true_risk_other_cause_death %>% as.character() %>% as.numeric() %>% style_percent(symbol = TRUE)}") %>%
+              str_glue(),
+            y = "True Risk",
+            x = "Model Risk",
+            color = ""
+          ) +
+          theme(plot.title = element_text(size = 12))
+      ) %>%
+      list(),
+    auc =
+      prediction_columns %>%
+      map(
+        ~suppressMessages(
+          pROC::auc(data[["cancer_observed_at_time"]], data[[.x]])
+        )
+      ) %>%
+      setNames(prediction_columns) %>%
+      list(),
+    brier =
+      prediction_columns %>%
+      map(
+        ~suppressMessages(
+          measures::Brier(data[[.x]], data[["cancer_observed_at_time"]], negative = FALSE, positive = TRUE)
+        )
+      ) %>%
+      setNames(prediction_columns) %>%
+      list()
+  ) %>%
+  ungroup()
+df_results$gg_calibration[[1]]
+df_results$gg_dca[[1]]
+```
+
+# Save Results
+
+```{r save}
+# list result objects here. save only those needed for the final report
+save(
+  df_results,
+  file = here("results", "df_results.Rdata")
+)
+```
